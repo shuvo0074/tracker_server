@@ -137,17 +137,21 @@ function render() {
   }
 }
 
-async function select(id) {
+async function select(id, refit = true) {
   state.selected = id;
   render();
   const e = state.employees.get(id);
-  if (state.trail) state.trail.remove();
   if (!e || !e.shift) return;
   const pts = await fetch(`/api/shifts/${e.shift.id}/locations`).then((r) => r.json());
+  if (state.trail) state.trail.remove();
+  state.trail = null;
+  state.trailCount = pts.length;
   if (!pts.length) return;
   state.trail = L.polyline(pts.map((p) => [p.latitude, p.longitude]), { color: e.color, weight: 4, opacity: 0.85 }).addTo(map);
-  map.fitBounds(state.trail.getBounds().pad(0.3), { maxZoom: 17 });
-  state.markers.get(id)?.openPopup();
+  if (refit) {
+    map.fitBounds(state.trail.getBounds().pad(0.3), { maxZoom: 17 });
+    state.markers.get(id)?.openPopup();
+  }
 }
 
 document.getElementById('list').addEventListener('click', (ev) => {
@@ -155,30 +159,32 @@ document.getElementById('list').addEventListener('click', (ev) => {
   if (card) select(card.dataset.id);
 });
 
+// Serverless hosting can't hold long-lived connections, so poll for updates instead.
+const POLL_MS = 5000;
+const live = document.getElementById('live');
+
 async function load() {
-  const list = await fetch('/api/employees').then((r) => r.json());
-  list.forEach((e) => state.employees.set(e.id, e));
-  render();
-}
-
-function connect() {
-  const live = document.getElementById('live');
-  const es = new EventSource('/api/events');
-  es.onopen = () => { live.className = 'live'; live.lastChild.textContent = 'live'; load(); };
-  es.onerror = () => { live.className = 'live off'; live.lastChild.textContent = 'reconnecting'; };
-  es.addEventListener('employee', (m) => {
-    const e = JSON.parse(m.data);
-    state.employees.set(e.id, e);
+  try {
+    const list = await fetch('/api/employees', { cache: 'no-store' }).then((r) => {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    });
+    list.forEach((e) => state.employees.set(e.id, e));
+    live.className = 'live';
+    live.lastChild.textContent = 'live';
     render();
-  });
-  es.addEventListener('location', (m) => {
-    const { userId, points } = JSON.parse(m.data);
-    if (state.selected === userId && state.trail) points.forEach((p) => state.trail.addLatLng([p.latitude, p.longitude]));
-  });
+    const sel = state.selected && state.employees.get(state.selected);
+    if (sel && sel.pointCount !== state.trailCount) select(sel.id, false);
+  } catch {
+    live.className = 'live off';
+    live.lastChild.textContent = 'reconnecting';
+  }
 }
 
-load().then(connect);
-setInterval(render, 15000); // refresh relative times
+(async function poll() {
+  await load();
+  setTimeout(poll, POLL_MS);
+})();
 </script>
 </body>
 </html>
