@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ShiftTracker Dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root {
+      --bg: #0b0d17; --panel: #131628; --card: #1a1e35; --line: #262b4a;
+      --text: #eef0ff; --muted: #8b90b8; --accent: #7c5cff; --ok: #2ee6a6; --warn: #ffb547; --off: #5a5f86;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: grid; grid-template-columns: 360px 1fr; }
+    aside { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+    header { padding: 20px 20px 12px; }
+    h1 { font-size: 18px; margin: 0; display: flex; align-items: center; gap: 10px; }
+    .live { font-size: 11px; font-weight: 600; color: var(--ok); background: rgba(46,230,166,.12); padding: 3px 8px; border-radius: 99px; display: inline-flex; align-items: center; gap: 6px; }
+    .live.off { color: var(--warn); background: rgba(255,181,71,.12); }
+    .live i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.6s infinite; }
+    @keyframes pulse { 50% { opacity: .25; } }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 0 20px 16px; }
+    .stat { background: var(--card); border-radius: 12px; padding: 10px 12px; }
+    .stat b { font-size: 20px; display: block; }
+    .stat span { font-size: 11px; color: var(--muted); }
+    #list { overflow-y: auto; padding: 0 12px 16px; flex: 1; }
+    .emp { background: var(--card); border: 1px solid transparent; border-radius: 14px; padding: 14px; margin-bottom: 10px; cursor: pointer; transition: border-color .15s, transform .15s; }
+    .emp:hover { transform: translateY(-1px); border-color: var(--line); }
+    .emp.sel { border-color: var(--accent); }
+    .row { display: flex; align-items: center; gap: 12px; }
+    .avatar { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; font-weight: 700; color: #fff; flex: none; }
+    .name { font-weight: 600; }
+    .role { font-size: 12px; color: var(--muted); }
+    .pill { margin-left: auto; font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 99px; }
+    .pill.on { color: var(--ok); background: rgba(46,230,166,.12); }
+    .pill.stale { color: var(--warn); background: rgba(255,181,71,.12); }
+    .pill.off { color: var(--muted); background: rgba(139,144,184,.12); }
+    .meta { display: flex; gap: 14px; margin-top: 10px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+    .meta b { color: var(--text); font-weight: 500; }
+    #map { height: 100vh; }
+    .pin { width: 34px; height: 34px; border-radius: 50%; border: 3px solid #fff; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,.4); position: relative; }
+    .pin.on::after { content: ''; position: absolute; inset: -9px; border-radius: 50%; border: 2px solid currentColor; animation: ring 2s infinite; }
+    @keyframes ring { from { transform: scale(.6); opacity: 1; } to { transform: scale(1.4); opacity: 0; } }
+    .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--panel); color: var(--text); }
+    .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 30px; }
+    @media (max-width: 760px) { body { grid-template-columns: 1fr; grid-template-rows: 50vh 50vh; } aside { order: 2; } #map { height: 50vh; } }
+  </style>
+</head>
+<body>
+  <aside>
+    <header>
+      <h1>📍 ShiftTracker <span id="live" class="live off"><i></i>connecting</span></h1>
+    </header>
+    <div class="stats">
+      <div class="stat"><b id="sOn">0</b><span>On shift</span></div>
+      <div class="stat"><b id="sTotal">0</b><span>Employees</span></div>
+      <div class="stat"><b id="sPts">0</b><span>Pings today</span></div>
+    </div>
+    <div id="list"></div>
+  </aside>
+  <div id="map"></div>
+
+<script>
+const map = L.map('map', { zoomControl: false }).setView([20, 0], 2);
+L.control.zoom({ position: 'bottomright' }).addTo(map);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap &copy; CARTO', maxZoom: 20,
+}).addTo(map);
+
+const state = { employees: new Map(), markers: new Map(), trail: null, selected: null, fitted: false };
+const STALE_MS = 3 * 60 * 1000;
+
+const ago = (ts) => {
+  if (!ts) return '—';
+  const s = Math.round((Date.now() - ts) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  return Math.floor(s / 3600) + 'h ago';
+};
+const dur = (from, to = Date.now()) => {
+  const m = Math.floor((to - from) / 60000);
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+};
+const initials = (n) => n.split(' ').map((x) => x[0]).join('').slice(0, 2);
+const status = (e) => !e.onShift ? 'off' : (e.last && Date.now() - e.last.receivedAt < STALE_MS ? 'on' : 'stale');
+const statusLabel = { on: 'On shift', stale: 'No signal', off: 'Off shift' };
+
+function render() {
+  const list = [...state.employees.values()].sort((a, b) => (b.onShift - a.onShift) || a.name.localeCompare(b.name));
+  document.getElementById('sOn').textContent = list.filter((e) => e.onShift).length;
+  document.getElementById('sTotal').textContent = list.length;
+  const today = new Date().setHours(0, 0, 0, 0);
+  document.getElementById('sPts').textContent = list.reduce((n, e) => n + (e.shift && e.shift.startedAt >= today ? e.pointCount : 0), 0);
+
+  document.getElementById('list').innerHTML = list.length ? list.map((e) => {
+    const st = status(e);
+    const bat = e.last && e.last.battery != null ? Math.round(e.last.battery * 100) + '%' : '—';
+    return `<div class="emp ${state.selected === e.id ? 'sel' : ''}" data-id="${e.id}">
+      <div class="row">
+        <div class="avatar" style="background:${e.color}">${initials(e.name)}</div>
+        <div><div class="name">${e.name}</div><div class="role">${e.role}</div></div>
+        <span class="pill ${st}">${statusLabel[st]}</span>
+      </div>
+      <div class="meta">
+        <span>⏱ <b>${e.onShift ? dur(e.shift.startedAt) : e.shift ? 'ended ' + ago(e.shift.endedAt) : 'never'}</b></span>
+        <span>📡 <b>${e.last ? ago(e.last.receivedAt) : '—'}</b></span>
+        <span>🔋 <b>${bat}</b></span>
+        <span>• <b>${e.pointCount}</b> pts</span>
+      </div>
+    </div>`;
+  }).join('') : '<div class="empty">No employees yet</div>';
+
+  for (const e of list) {
+    if (!e.last) continue;
+    const st = status(e);
+    const icon = L.divIcon({
+      className: '',
+      html: `<div class="pin ${st}" style="background:${st === 'off' ? '#5a5f86' : e.color};color:${e.color}">${initials(e.name)}</div>`,
+      iconSize: [34, 34], iconAnchor: [17, 17],
+    });
+    const pos = [e.last.latitude, e.last.longitude];
+    const popup = `<b>${e.name}</b><br>${statusLabel[st]} · ${ago(e.last.receivedAt)}<br>±${Math.round(e.last.accuracy || 0)} m`;
+    let m = state.markers.get(e.id);
+    if (!m) {
+      m = L.marker(pos, { icon }).addTo(map).on('click', () => select(e.id));
+      state.markers.set(e.id, m);
+    } else {
+      m.setLatLng(pos).setIcon(icon);
+    }
+    m.bindPopup(popup);
+  }
+
+  if (!state.fitted && state.markers.size) {
+    state.fitted = true;
+    map.fitBounds(L.featureGroup([...state.markers.values()]).getBounds().pad(0.4), { maxZoom: 16 });
+  }
+}
+
+async function select(id) {
+  state.selected = id;
+  render();
+  const e = state.employees.get(id);
+  if (state.trail) state.trail.remove();
+  if (!e || !e.shift) return;
+  const pts = await fetch(`/api/shifts/${e.shift.id}/locations`).then((r) => r.json());
+  if (!pts.length) return;
+  state.trail = L.polyline(pts.map((p) => [p.latitude, p.longitude]), { color: e.color, weight: 4, opacity: 0.85 }).addTo(map);
+  map.fitBounds(state.trail.getBounds().pad(0.3), { maxZoom: 17 });
+  state.markers.get(id)?.openPopup();
+}
+
+document.getElementById('list').addEventListener('click', (ev) => {
+  const card = ev.target.closest('.emp');
+  if (card) select(card.dataset.id);
+});
+
+async function load() {
+  const list = await fetch('/api/employees').then((r) => r.json());
+  list.forEach((e) => state.employees.set(e.id, e));
+  render();
+}
+
+function connect() {
+  const live = document.getElementById('live');
+  const es = new EventSource('/api/events');
+  es.onopen = () => { live.className = 'live'; live.lastChild.textContent = 'live'; load(); };
+  es.onerror = () => { live.className = 'live off'; live.lastChild.textContent = 'reconnecting'; };
+  es.addEventListener('employee', (m) => {
+    const e = JSON.parse(m.data);
+    state.employees.set(e.id, e);
+    render();
+  });
+  es.addEventListener('location', (m) => {
+    const { userId, points } = JSON.parse(m.data);
+    if (state.selected === userId && state.trail) points.forEach((p) => state.trail.addLatLng([p.latitude, p.longitude]));
+  });
+}
+
+load().then(connect);
+setInterval(render, 15000); // refresh relative times
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "shift-tracker-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal API + live dashboard for the ShiftTracker app",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "simulate": "node simulate.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
